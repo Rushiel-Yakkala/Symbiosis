@@ -1,0 +1,6 @@
+celery
+redis
+boto3
+pymongo
+openai-whisper
+python-dotenv
