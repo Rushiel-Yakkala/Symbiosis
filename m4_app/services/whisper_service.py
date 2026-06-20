@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 # Cached whisper model instance
 _model = None
 
-def get_whisper_model(model_name: str = "base"):
+def get_whisper_model(model_name: str = "small"):
     """
     Lazily loads the Whisper model and caches it in memory.
     The default model name is "base" (approx. 140MB).
@@ -25,7 +25,7 @@ def get_whisper_model(model_name: str = "base"):
         logger.info("Whisper model loaded successfully.")
     return _model
 
-def transcribe_audio(audio_path: str, model_name: str = "base") -> str:
+def transcribe_audio(audio_path: str, model_name: str = "small") -> str:
     """
     Transcribes a local audio file using OpenAI Whisper and returns the clean text.
     """

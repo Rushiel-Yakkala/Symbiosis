@@ -11,10 +11,9 @@ class Settings:
     MINIO_ROOT_USER: str = os.getenv("MINIO_ROOT_USER", "") # Empty means boto3 reads IAM credentials
     MINIO_ROOT_PASSWORD: str = os.getenv("MINIO_ROOT_PASSWORD", "")
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
-    MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
     CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
     
-    # Bucket name for video synopsis audio (configurable in prod)
+    # Bucket name for video synopsis audio/transcripts (matches M3's bucket)
     BUCKET_NAME: str = os.getenv("BUCKET_NAME", "video-synopsis-audio")
 
 settings = Settings()

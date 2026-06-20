@@ -8,13 +8,6 @@ services:
       - "6379:6379"
     restart: unless-stopped
 
-  mongodb:
-    image: mongo:latest
-    container_name: m4_mongodb
-    ports:
-      - "27017:27017"
-    restart: unless-stopped
-
   minio:
     image: minio/minio:latest
     container_name: m4_minio

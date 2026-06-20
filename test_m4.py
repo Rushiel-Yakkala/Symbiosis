@@ -1,151 +1,161 @@
+"""
+M4 Unit Tests — Validates the standalone transcription pipeline.
+
+Tests:
+- S3 download service
+- S3 upload_transcript service
+- S3 delete_object service
+- Whisper service (small model)
+- Full task: audio flow (Whisper → upload transcript → delete audio)
+- Full task: captions pass-through flow
+"""
 import unittest
 from unittest.mock import patch, MagicMock, mock_open
 import os
 import sys
 
-# Import services and tasks relative to current workspace
-from m4_app.services import s3_service, db_service, whisper_service
+# Import services and tasks
+from m4_app.services import s3_service, whisper_service
 from m4_app.tasks.transcription_tasks import process_transcription
 
-class TestModule4(unittest.TestCase):
-    
+
+class TestM4S3Service(unittest.TestCase):
+    """Tests for S3/MinIO service functions."""
+
     @patch("m4_app.services.s3_service.boto3.client")
-    def test_s3_service_download(self, mock_boto_client):
-        # Setup mock client
+    def test_s3_download(self, mock_boto_client):
         mock_s3 = MagicMock()
         mock_boto_client.return_value = mock_s3
-        
-        # Test download
+
         s3_service.download_file("audio/xyz.wav", "temp_xyz.wav")
-        
-        # Check download_file was called with default bucket and key
+
         mock_s3.download_file.assert_called_once_with(
             "video-synopsis-audio", "audio/xyz.wav", "temp_xyz.wav"
         )
-        
-    @patch("m4_app.services.db_service.pymongo.MongoClient")
-    def test_db_service_save(self, mock_mongo_client):
-        # Setup mock mongo client & collection
-        mock_client = MagicMock()
-        mock_mongo_client.return_value = mock_client
-        mock_db = mock_client["video_synopsis"]
-        mock_coll = mock_db["transcripts"]
-        
-        metadata = {
-            "title": "Test Title",
-            "channel_name": "Test Channel",
-            "duration_seconds": 120
-        }
-        
-        result = db_service.save_transcript(
-            video_id="video123",
-            transcript_text="Hello world",
-            source="whisper",
-            metadata=metadata
+
+    @patch("m4_app.services.s3_service.boto3.client")
+    def test_s3_upload_transcript(self, mock_boto_client):
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        result = s3_service.upload_transcript("Hello world transcript", "vid123")
+
+        self.assertEqual(result, "s3://video-synopsis-audio/transcripts/vid123.txt")
+        mock_s3.upload_file.assert_called_once()
+
+    @patch("m4_app.services.s3_service.boto3.client")
+    def test_s3_delete_object(self, mock_boto_client):
+        mock_s3 = MagicMock()
+        mock_boto_client.return_value = mock_s3
+
+        s3_service.delete_object("video-synopsis-audio", "audio/vid123.wav")
+
+        mock_s3.delete_object.assert_called_once_with(
+            Bucket="video-synopsis-audio", Key="audio/vid123.wav"
         )
-        
-        # Verify schema structure matches requested requirements
-        self.assertEqual(result["_id"], "video123")
-        self.assertEqual(result["video_id"], "video123")
-        self.assertEqual(result["transcript_text"], "Hello world")
-        self.assertEqual(result["source"], "whisper")
-        self.assertEqual(result["language"], "en")
-        self.assertIn("created_at", result)
-        self.assertEqual(result["metadata"]["title"], "Test Title")
-        self.assertEqual(result["metadata"]["channel_name"], "Test Channel")
-        self.assertEqual(result["metadata"]["duration_seconds"], 120)
-        
-        # Verify upsert call
-        mock_coll.replace_one.assert_called_once_with(
-            {"_id": "video123"}, result, upsert=True
-        )
-        
+
+
+class TestM4WhisperService(unittest.TestCase):
+    """Tests for Whisper transcription service (small model)."""
+
     @patch("m4_app.services.whisper_service.os.path.exists")
-    def test_whisper_service(self, mock_exists):
+    def test_whisper_transcription(self, mock_exists):
         mock_exists.return_value = True
         whisper_service._model = None  # Reset cached model
-        
+
         mock_whisper = MagicMock()
         mock_model = MagicMock()
         mock_whisper.load_model.return_value = mock_model
         mock_model.transcribe.return_value = {"text": "   Transcribed text from whisper   "}
-        
+
         with patch.dict("sys.modules", {"whisper": mock_whisper}):
-            # Call transcribe
             text = whisper_service.transcribe_audio("fake_path.wav")
-            
-            # Verify model loading and transcribe call
-            mock_whisper.load_model.assert_called_once_with("base", device="cpu")
+
+            # Verify small model is loaded (M4 uses small for better accuracy)
+            mock_whisper.load_model.assert_called_once_with("small", device="cpu")
             mock_model.transcribe.assert_called_once_with("fake_path.wav")
             self.assertEqual(text, "Transcribed text from whisper")
+
+
+class TestM4TranscriptionTask(unittest.TestCase):
+    """Tests for the M4 Celery transcription task."""
 
     @patch("m4_app.tasks.transcription_tasks.os.path.exists")
     @patch("m4_app.tasks.transcription_tasks.os.remove")
     @patch("m4_app.tasks.transcription_tasks.s3_service")
-    @patch("m4_app.tasks.transcription_tasks.db_service")
     @patch("m4_app.tasks.transcription_tasks.whisper_service")
-    def test_task_whisper_flow(self, mock_whisper, mock_db, mock_s3, mock_remove, mock_exists):
-        # Setup mock behaviors
+    def test_audio_flow_whisper(self, mock_whisper, mock_s3, mock_remove, mock_exists):
+        """Flow B: Audio → Whisper → Upload transcript → Delete audio."""
         mock_exists.return_value = True
         mock_whisper.transcribe_audio.return_value = "transcribed audio text"
-        mock_db.save_transcript.return_value = {"status": "saved"}
-        
+        mock_s3.upload_transcript.return_value = "s3://video-synopsis-audio/transcripts/v123.txt"
+        mock_s3.parse_s3_uri.return_value = ("video-synopsis-audio", "audio/v123.wav")
+
         payload = {
             "video_id": "v123",
             "metadata": {"title": "T", "channel_name": "C", "duration_seconds": 10},
             "has_captions": False,
             "s3_transcript_uri": None,
-            "s3_audio_uri": "audio/v123.wav"
+            "s3_audio_uri": "s3://video-synopsis-audio/audio/v123.wav"
         }
-        
+
         result = process_transcription(payload)
-        
-        # S3 download should have been called
+
+        # S3 download should have been called (downloading audio)
         mock_s3.download_file.assert_called_once()
         # Whisper transcription should have been called
         mock_whisper.transcribe_audio.assert_called_once()
-        # Save transcript should have been called
-        mock_db.save_transcript.assert_called_once_with(
-            video_id="v123",
-            transcript_text="transcribed audio text",
-            source="whisper",
-            metadata=payload["metadata"]
-        )
-        # Cleanup should have deleted the temp file
+        # Transcript should have been uploaded to MinIO
+        mock_s3.upload_transcript.assert_called_once_with("transcribed audio text", "v123")
+        # Audio should have been deleted from MinIO
+        mock_s3.delete_object.assert_called_once_with("video-synopsis-audio", "audio/v123.wav")
+        # Result should have transcript URI and no audio URI
+        self.assertEqual(result["source"], "whisper")
+        self.assertEqual(result["s3_transcript_uri"], "s3://video-synopsis-audio/transcripts/v123.txt")
+        self.assertIsNone(result["s3_audio_uri"])
+        self.assertEqual(result["status"], "transcribed_and_stored")
+        # Local temp file should have been cleaned up
         mock_remove.assert_called_once()
 
-    @patch("m4_app.tasks.transcription_tasks.os.path.exists")
-    @patch("m4_app.tasks.transcription_tasks.os.remove")
-    @patch("m4_app.tasks.transcription_tasks.s3_service")
-    @patch("m4_app.tasks.transcription_tasks.db_service")
-    @patch("builtins.open", new_callable=mock_open, read_data="downloaded caption transcript")
-    def test_task_transcript_flow(self, mock_file_open, mock_db, mock_s3, mock_remove, mock_exists):
-        mock_exists.return_value = True
-        mock_db.save_transcript.return_value = {"status": "saved"}
-        
+    def test_captions_passthrough(self):
+        """Flow A: Transcript already exists — pass through, no Whisper."""
         payload = {
             "video_id": "v456",
             "metadata": {"title": "T2", "channel_name": "C2", "duration_seconds": 20},
             "has_captions": True,
-            "s3_transcript_uri": "transcripts/v456.txt",
+            "s3_transcript_uri": "s3://video-synopsis-audio/transcripts/v456.txt",
             "s3_audio_uri": None
         }
-        
+
         result = process_transcription(payload)
-        
-        # S3 download called
-        mock_s3.download_file.assert_called_once()
-        # File opened and read
-        mock_file_open.assert_called_once()
-        # DB save called with captions source
-        mock_db.save_transcript.assert_called_once_with(
-            video_id="v456",
-            transcript_text="downloaded caption transcript",
-            source="youtube_captions",
-            metadata=payload["metadata"]
-        )
-        # Cleanup called
-        mock_remove.assert_called_once()
+
+        # Should pass through without any external calls
+        self.assertEqual(result["source"], "youtube_captions")
+        self.assertEqual(result["s3_transcript_uri"], "s3://video-synopsis-audio/transcripts/v456.txt")
+        self.assertIsNone(result["s3_audio_uri"])
+        self.assertEqual(result["status"], "transcript_already_exists")
+
+    def test_missing_video_id_raises(self):
+        """Task should raise ValueError when video_id is missing."""
+        payload = {
+            "metadata": {},
+            "s3_transcript_uri": None,
+            "s3_audio_uri": None
+        }
+        with self.assertRaises(ValueError):
+            process_transcription(payload)
+
+    def test_no_uri_raises(self):
+        """Task should raise ValueError when both URIs are missing."""
+        payload = {
+            "video_id": "v789",
+            "metadata": {},
+            "s3_transcript_uri": None,
+            "s3_audio_uri": None
+        }
+        with self.assertRaises(ValueError):
+            process_transcription(payload)
+
 
 if __name__ == "__main__":
     unittest.main()
