@@ -49,26 +49,33 @@ The pipeline acts as a Celery worker that listens for ingestion triggers from M3
 
 ## Prerequisites
 
-- **Python 3.8+**
-- **FFmpeg**: Required by Whisper to process audio streams.
-  - *Windows*: Download via Chocolatey (`choco install ffmpeg`) or from the official website and add it to your System PATH.
-  - *macOS*: Install via Homebrew (`brew install ffmpeg`).
-  - *Linux*: Install via Apt (`apt-get install ffmpeg`).
-- **Docker & Docker Compose** (Optional: for running live local containers).
+### 1. Python Environment
+- **Python 3.8+** is required.
+
+### 2. FFmpeg Installation
+Whisper requires **FFmpeg** to process and decode audio files. Ensure it is installed and added to your system path:
+- **Windows**: Install using Winget (`winget install Gyan.FFmpeg`) or Chocolatey (`choco install ffmpeg`), or download from [ffmpeg.org](https://ffmpeg.org/download.html) and manually add the `bin` directory to your System `PATH`.
+- **macOS**: Install using Homebrew (`brew install ffmpeg`).
+- **Linux**: Install via apt (`sudo apt-get install -y ffmpeg`).
 
 ---
 
-## Getting Started
+## PART A: Standalone Execution (No Docker)
 
-### 1. Local Virtual Environment Setup
-Initialize a Python virtual environment and install the package dependencies:
+Follow these steps if you do not have Docker installed or want to run and test the module natively on your machine.
+
+### Step 1: Virtual Environment Setup
+Initialize a clean Python virtual environment and install the required dependencies:
+
 ```bash
 # Create virtual environment
 python -m venv venv
 
 # Activate virtual environment
-# Windows:
-.\venv\Scripts\activate
+# Windows (PowerShell):
+.\venv\Scripts\Activate.ps1
+# Windows (CMD):
+.\venv\Scripts\activate.bat
 # macOS/Linux:
 source venv/bin/activate
 
@@ -76,50 +83,37 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Infrastructure Setup (Docker)
-Start the local message broker and object storage:
-```bash
-docker compose up -d
-```
-*This will spin up:*
-- **Redis** on port `6379` (Broker)
-- **MinIO** on ports `9000` (API) & `9001` (Console) with bucket `video-synopsis-audio` auto-created.
+> [!TIP]
+> First run of OpenAI Whisper will automatically download the required model weights (defaults to the `small` model, ~460MB).
 
-> **Note:** MongoDB is no longer required for M4.
+---
 
-### 3. Run the Celery Worker
-Start the worker process:
+### Option A1: Zero-Dependency Offline Execution (Recommended)
+If you want to run the code pipeline immediately without installing or running queue or object storage services (like Redis or MinIO/S3), you can run the mock validation suites:
+
+#### 1. Run Unit Tests
+Verifies S3, Whisper, and task logic locally with mocked network requests:
 ```bash
-celery -A m4_app.main.celery_app worker --loglevel=info
+python -m unittest test_m4.py
 ```
 
-### 4. Trigger Ingestion Test
-In another terminal (with venv activated), run the trigger script to generate a dummy WAV file, upload it to MinIO, and queue the M4 Celery task:
+#### 2. Run Eager Pipeline flow
+Executes the Celery task synchronously inside your active Python thread using eager mode (`task_always_eager=True`), simulating the download of an audio file, transcribing it using Whisper, and storing the output transcript:
 ```bash
-python test_trigger.py
+python run_mocked_flow.py
 ```
 
 ---
 
-## Offline Testing & Validation
+### Option A2: Local Native Execution (Using Local Services)
+If you want to run the real Celery worker and trigger live integration tasks without using Docker:
 
-If you do not have Docker installed, you can still test and verify the entire code pipeline using:
+#### 1. Setup Local Services
+You will need running instances of the following services:
+- **Redis Server** (Default port `6379`) - Used as the message broker.
+- **MinIO Server** (Default port `9000`/`9001`) or an active **AWS S3** bucket.
 
-* **Mock Unit Tests**: Runs mock checks verifying download, upload, delete, and transcription logic:
-  ```bash
-  python -m unittest test_m4.py
-  ```
-
-* **Eager Execution Run**: Runs the real Celery task synchronously in eager mode, mocking out external storage connections:
-  ```bash
-  python run_mocked_flow.py
-  ```
-
----
-
-## Configuration Variables (`.env`)
-
-You can create a `.env` file in the root of the project to customize settings:
+Configure these connection URIs in your `.env` file at the root of the project:
 ```ini
 MINIO_URL=http://localhost:9000
 MINIO_ROOT_USER=admin
@@ -128,6 +122,64 @@ CELERY_BROKER_URL=redis://localhost:6379/0
 AWS_REGION=us-east-1
 BUCKET_NAME=video-synopsis-audio
 ```
+
+#### 2. Start the Celery Worker
+Activate your virtual environment and start the worker daemon:
+```bash
+celery -A m4_app.main.celery_app worker --loglevel=info
+```
+
+#### 3. Trigger Ingestion and Transcription
+In a separate terminal window (with virtual environment activated), execute the trigger test script to upload a sample wav file to local storage, queue the transcription job, and wait for the response:
+```bash
+python test_trigger.py
+```
+
+---
+
+## PART B: Importing & Integrating with Docker
+
+Use these instructions when you are importing the M4 standalone module back into the main **Video Synopsis** pipeline and need to run it inside containerized environments.
+
+### 1. Docker Version Compatibility
+Ensure your local host or deployment server meets the following specifications:
+- **Docker Engine**: Version `20.10.0` or higher
+- **Docker Compose**: Version `2.0.0` or higher (integrated as `docker compose`, not legacy `docker-compose`)
+
+### 2. Building the Worker Image
+To build the Docker image for the standalone transcription worker:
+```bash
+docker build -t m4-transcription-worker:latest .
+```
+
+### 3. Deploying via Docker Compose
+To spin up all local development infrastructure (Redis and MinIO) inside Docker:
+```bash
+# Start all supporting services in background
+docker compose up -d
+```
+
+### 4. Running the Celery Worker Container
+Once the services are active, you can spin up the worker container:
+```bash
+# Start the worker container referencing local network
+docker run --name m4_worker --network m4_standalone_default -e CELERY_BROKER_URL=redis://redis:6379/0 m4-transcription-worker:latest
+```
+
+---
+
+## Configuration Variables Reference
+
+Customize your environment variables in `.env`:
+
+| Variable | Default Value | Description |
+| :--- | :--- | :--- |
+| `MINIO_URL` | `http://localhost:9000` | Endpoint URL for MinIO (leave blank for real AWS S3) |
+| `MINIO_ROOT_USER` | `admin` | Access key ID for MinIO / S3 |
+| `MINIO_ROOT_PASSWORD` | `password123` | Secret access key for MinIO / S3 |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker and backend connection URI |
+| `AWS_REGION` | `us-east-1` | Target S3 bucket AWS Region |
+| `BUCKET_NAME` | `video-synopsis-audio` | Destination bucket name for files |
 
 ---
 
@@ -142,12 +194,11 @@ See [M4CONNECTIVITY.md](M4CONNECTIVITY.md) for the full integration guide showin
 
 ---
 
-## Production Deployment Checklist
+## Production Checklist & Optimization
 
-1. **IAM Roles**: In AWS, clear out `MINIO_URL` and credential vars. The `boto3` client will automatically default to standard AWS endpoints and read container IAM policies.
-2. **GPU Support**: If running on GPU VMs, ensure `cuda` is available. Whisper will automatically load the model onto GPU hardware.
-3. **Resilience**: Task failures trigger automated Celery retries configured with exponential backoffs up to 5 minutes.
-4. **Flower Monitoring**: Run Flower side-by-side with Celery for live task monitoring:
+1. **IAM Roles**: When deploying to AWS ECS or EKS, remove `MINIO_URL` and credential keys from `.env`. The `boto3` client will automatically default to standard AWS S3 endpoints and read the container IAM roles.
+2. **GPU Acceleration**: If deploying on GPU-enabled virtual machines (e.g. AWS `g4dn` instances), ensure PyTorch CUDA is installed inside the image. Whisper will automatically load the model onto the GPU.
+3. **Task Monitoring**: Run Flower side-by-side with your worker to inspect active queues and task progress:
    ```bash
    pip install flower
    celery -A m4_app.main.celery_app flower
